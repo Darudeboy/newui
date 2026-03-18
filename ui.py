@@ -43,6 +43,10 @@ from typing import Any, List, TypedDict, Annotated, Sequence
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
 
+# Публикация успешного комментария в Jira (анти-спам в orchestrator).
+# Управляется тумблером в UI (только guided cycle).
+APPROVAL_STATUS_NAME = os.getenv("RELEASE_APPROVAL_STATUS", "Утверждение ППСИ")
+
 # Отключаем SSL-шум для Агента
 warnings.filterwarnings('ignore')
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1793,6 +1797,15 @@ class ModernJiraApp(ctk.CTk):
         self.dry_run_check = ctk.CTkCheckBox(options_frame, text="Тестовый прогон", variable=self.dry_run_var, font=ctk.CTkFont(size=13))
         self.dry_run_check.pack(side="left", padx=10)
 
+        self.post_success_comment_var = ctk.BooleanVar(value=False)
+        self.post_success_comment_check = ctk.CTkCheckBox(
+            options_frame,
+            text="✅ Комментировать успех в Jira",
+            variable=self.post_success_comment_var,
+            font=ctk.CTkFont(size=13),
+        )
+        self.post_success_comment_check.pack(side="left", padx=10)
+
         self.parallel_var = ctk.BooleanVar(value=True)
         self.parallel_check = ctk.CTkCheckBox(options_frame, text="Параллельная обработка", variable=self.parallel_var, font=ctk.CTkFont(size=13))
         self.parallel_check.pack(side="left", padx=10)
@@ -2585,6 +2598,9 @@ class ModernJiraApp(ctk.CTk):
                 release_key=release_key,
                 profile_name=profile,
                 manual_confirmations=(self.guided_cycle_context.get(release_key, {}) or {}).get("manual_confirmations"),
+                post_success_comment=bool(getattr(self, "post_success_comment_var", None) and self.post_success_comment_var.get()),
+                approval_status=APPROVAL_STATUS_NAME,
+                dry_run=dry_run,
             )
             report = format_release_gate_report(result)
 

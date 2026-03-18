@@ -157,6 +157,51 @@ class JiraService:
             )
             return []
 
+    def add_issue_comment(self, issue_key: str, body: str) -> Tuple[bool, str]:
+        """Добавляет комментарий к задаче."""
+        safe_key = (issue_key or "").strip().upper()
+        text = (body or "").strip()
+        if not safe_key:
+            return False, "Не указан issue_key"
+        if not text:
+            return False, "Комментарий пустой"
+        try:
+            response = self.jira.post(
+                f"/rest/api/2/issue/{safe_key}/comment",
+                data={"body": text},
+                advanced_mode=True,
+            )
+            if response.status_code in (200, 201):
+                return True, "Комментарий добавлен"
+            return False, f"Jira вернул код {response.status_code} при добавлении комментария"
+        except Exception as e:
+            self.logger.error("Ошибка добавления комментария для %s: %s", safe_key, e)
+            return False, f"Ошибка добавления комментария: {e}"
+
+    def has_recent_comment(
+        self,
+        issue_key: str,
+        marker: str,
+        lookback: int = 20,
+    ) -> bool:
+        """Проверяет, есть ли среди последних комментариев маркер (анти-спам)."""
+        safe_key = (issue_key or "").strip().upper()
+        mark = (marker or "").strip()
+        if not safe_key or not mark:
+            return False
+        try:
+            comments = self.get_issue_comments(safe_key)
+            if not comments:
+                return False
+            for item in (comments[-lookback:] if lookback > 0 else comments):
+                body = item.get("body", "")
+                body_text = body if isinstance(body, str) else str(body)
+                if mark in body_text:
+                    return True
+            return False
+        except Exception:
+            return False
+
     def get_field_name_map(self) -> Dict[str, str]:
         """Карта field_id -> display name из Jira."""
         if self._field_name_map_cache is not None:

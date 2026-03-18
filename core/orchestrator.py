@@ -4,7 +4,7 @@ run_release_check: сбор snapshot → rules → учёт manual_confirmations
 run_release_action: переход по transition_id или имени статуса.
 """
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from core.snapshot_builder import build_release_snapshot
 from core.rules import evaluate_gates
@@ -12,12 +12,58 @@ from core.release_flow_config import get_release_flow_profile
 
 logger = logging.getLogger(__name__)
 
+SUCCESS_COMMENT_MARKER = "[Release-Gates]"
+SUCCESS_COMMENT_TEXT = f"{SUCCESS_COMMENT_MARKER} Релиз готов к внедрению"
+
+
+def maybe_post_success_comment(
+    jira_service: Any,
+    result: Dict[str, Any],
+    *,
+    approval_status: str = "Утверждение ППСИ",
+    dry_run: bool = False,
+) -> Tuple[bool, str]:
+    """
+    Публикует один успешный комментарий в Jira (анти-спам по маркеру).
+    Условия:
+    - auto_failed пуст
+    - next_allowed_transition == approval_status
+    - dry_run=False
+    """
+    if dry_run:
+        return False, "dry-run: comment skipped"
+    if not result.get("success"):
+        return False, "result not successful"
+    if result.get("auto_failed"):
+        return False, "auto_failed not empty"
+    if (result.get("next_allowed_transition") or "") != approval_status:
+        return False, "not approval stage"
+
+    release_key = (result.get("release_key") or "").strip().upper()
+    if not release_key:
+        return False, "missing release_key"
+
+    has_recent = getattr(jira_service, "has_recent_comment", None)
+    if callable(has_recent) and jira_service.has_recent_comment(
+        release_key, SUCCESS_COMMENT_MARKER, lookback=20
+    ):
+        return False, "already posted"
+
+    add_comment = getattr(jira_service, "add_issue_comment", None)
+    if not callable(add_comment):
+        return False, "jira_service does not support comments"
+    return jira_service.add_issue_comment(release_key, SUCCESS_COMMENT_TEXT)
+
 
 def run_release_check(
     jira_service: Any,
     release_key: str,
     profile_name: str = "auto",
     manual_confirmations: Optional[Dict[str, bool]] = None,
+    *,
+    post_success_comment: bool = False,
+    approval_status: str = "Утверждение ППСИ",
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
     """
     Оценка гейтов релиза. Совместимый с прежним evaluate_release_gates результат.
@@ -54,6 +100,18 @@ def run_release_check(
     result["ready_for_transition"] = (
         len(result["auto_failed"]) == 0 and len(still_pending) == 0 and bool(result.get("next_allowed_transition"))
     )
+
+    if post_success_comment:
+        ok, msg = maybe_post_success_comment(
+            jira_service,
+            result,
+            approval_status=approval_status,
+            dry_run=dry_run,
+        )
+        if ok:
+            logger.info("Posted success comment for %s", safe_release)
+        else:
+            logger.debug("Skip/failed posting success comment for %s: %s", safe_release, msg)
 
     return result
 
