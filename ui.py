@@ -166,6 +166,8 @@ class BlastAIAssistant:
         self.memory = []
         self.pending_bt_release_key: str | None = None
         self.pending_arch_release_key: str | None = None
+        self.pending_link_release_key: str | None = None
+        self.pending_link_fix_version: str | None = None
         self.llm = SberGigaChatHR().bind_tools([])
         self._setup_graph()
 
@@ -874,45 +876,76 @@ class BlastAIAssistant:
         lowered = raw.lower()
 
         def _extract_fix_version_from_text(payload: str) -> str:
+            # 1) Явный формат: fixVersion=... / fixVersion: ... / версия ...
+            # Важно: fixVersion может быть любым (HF-20, Minor-..., 2026-03-..., SM-HF-...),
+            # поэтому не валидируем по шаблону, кроме исключения HRPRELEASE-<n>.
             explicit = re.search(
-                r"(?:верси\w*|fix\s*version|fixversion)\s*[:=]?\s*([A-Z0-9._\-]+)",
+                r"(?:верси\w*|fix\s*version|fixversion)\s*[:=]?\s*([^\s,;]+)",
                 payload,
                 re.IGNORECASE,
             )
             if explicit:
-                candidate = explicit.group(1).strip()
+                candidate = explicit.group(1).strip().strip("\"'`")
                 if re.fullmatch(r"HRPRELEASE-\d+", candidate, re.IGNORECASE):
                     return ""
-                if not re.fullmatch(r"[A-Z]+-\d+", candidate, re.IGNORECASE):
-                    return candidate
-                return ""
+                if candidate.upper() in {"HRC", "HRM", "NEUROUI", "SFILE", "SEARCHCS", "NEURO", "HRPDEV"}:
+                    return ""
+                return candidate
 
             labeled = re.search(
-                r"(?:project|проект)\s*[:=]?\s*[A-Z0-9_]+\s*[,;]?\s*(?:fix\s*version|fixversion|верси\w*)\s*[:=]?\s*([A-Z0-9._\-]+)",
+                r"(?:project|проект)\s*[:=]?\s*[A-Z0-9_]+\s*[,;]?\s*(?:fix\s*version|fixversion|верси\w*)\s*[:=]?\s*([^\s,;]+)",
                 payload,
                 re.IGNORECASE,
             )
             if labeled:
-                candidate = labeled.group(1).strip()
-                if not re.fullmatch(r"[A-Z]+-\d+", candidate, re.IGNORECASE) and not re.fullmatch(
-                    r"HRPRELEASE-\d+",
-                    candidate,
-                    re.IGNORECASE,
-                ):
+                candidate = labeled.group(1).strip().strip("\"'`")
+                if not re.fullmatch(r"HRPRELEASE-\d+", candidate, re.IGNORECASE):
                     return candidate
 
             # Поддержка короткого формата "HRC HM-REL-05-03-2026" без ключевых слов.
             token_candidates = re.findall(r"\b([A-Z0-9][A-Z0-9._\-]{4,})\b", payload, re.IGNORECASE)
             for token in token_candidates:
                 upper = token.upper()
-                if re.fullmatch(r"[A-Z]+-\d+", upper):
-                    continue
                 if re.fullmatch(r"HRPRELEASE-\d+", upper):
                     continue
                 if upper in {"HRC", "HRM", "NEUROUI", "SFILE", "SEARCHCS", "NEURO", "HRPDEV"}:
                     continue
                 return token.strip()
             return ""
+
+        # Pending-режим для привязки задач по fixVersion:
+        # - если агент спросил fixVersion, следующий ответ принимаем как fix_version (любой формат)
+        # - если агент спросил release_key, следующий ответ принимаем как release_key
+        if self.pending_link_release_key:
+            fix_version = (raw or "").strip().strip("\"'`")
+            release_key = self.pending_link_release_key
+            if fix_version:
+                self.pending_link_release_key = None
+                self.app_gui.append_ai_chat(
+                    f"🛠️ [Агент] Получил fixVersion '{fix_version}', привязываю задачи -> {release_key}\n"
+                )
+                result = self.app_gui.start_link_issues_from_ai(
+                    release_key=release_key,
+                    fix_version=fix_version,
+                )
+                self.app_gui.append_ai_chat(f"🤖 Blast AI: {result}\n\n")
+                return True
+
+        if self.pending_link_fix_version:
+            release_match_pending = re.search(r"(HRPRELEASE-\d+)", raw, re.IGNORECASE)
+            release_key = release_match_pending.group(1).upper() if release_match_pending else ""
+            fix_version = self.pending_link_fix_version
+            if release_key:
+                self.pending_link_fix_version = None
+                self.app_gui.append_ai_chat(
+                    f"🛠️ [Агент] Получил релиз '{release_key}', привязываю задачи {fix_version} -> {release_key}\n"
+                )
+                result = self.app_gui.start_link_issues_from_ai(
+                    release_key=release_key,
+                    fix_version=fix_version,
+                )
+                self.app_gui.append_ai_chat(f"🤖 Blast AI: {result}\n\n")
+                return True
 
         if self.pending_bt_release_key:
             project_match = re.fullmatch(r"\s*([A-Z][A-Z0-9_]{1,15})\s*", raw, re.IGNORECASE)
@@ -1002,7 +1035,7 @@ class BlastAIAssistant:
             return True
 
         version_match = re.search(
-            r"(?:верси\w*|fix\s*version|fixversion)\s*[:=]?\s*([A-Z0-9._\-]+)",
+            r"(?:верси\w*|fix\s*version|fixversion)\s*[:=]?\s*([^\s,;]+)",
             raw,
             re.IGNORECASE,
         )
@@ -1028,6 +1061,23 @@ class BlastAIAssistant:
                 fix_version=fix_version,
             )
             self.app_gui.append_ai_chat(f"🤖 Blast AI: {result}\n\n")
+            return True
+
+        # Если интент есть, но параметров не хватает — уточняем и сохраняем pending.
+        if link_intent and release_match and not version_match:
+            release_key = release_match.group(1).upper()
+            self.pending_link_release_key = release_key
+            self.app_gui.append_ai_chat(
+                "🤖 Blast AI: Ок. Укажи fixVersion (любой формат, например HF-20 или Minor-2026-03-01).\n\n"
+            )
+            return True
+
+        if link_intent and (not release_match) and version_match:
+            fix_version = version_match.group(1).strip()
+            self.pending_link_fix_version = fix_version
+            self.app_gui.append_ai_chat(
+                "🤖 Blast AI: Ок. Укажи ключ релиза (например HRPRELEASE-116176), куда привязать задачи.\n\n"
+            )
             return True
 
         pr_intent = any(
